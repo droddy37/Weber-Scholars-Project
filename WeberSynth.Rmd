@@ -1,0 +1,672 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(MatchIt)
+library(lmtest)
+library(sandwich)
+library(plm)
+library(lme4)
+library(tidyr)
+library(readr)
+library(GGally)
+library(corrplot)
+library(factoextra)
+library(tibble)
+library(haven)
+library(Synth)
+library(fixest)
+library(car)
+library(infer)
+library(ggResidpanel)
+library(lfe)
+library(nlme)
+library(gsynth)
+library(rdrobust)
+library(ggthemes)
+library(kableExtra)
+library(stargazer)
+library(broom)
+library(knitr)
+library(texreg)
+
+Districts_data <- read_csv("/Users/donovanroddy/Weber Scholars Project/Districts_data.csv")
+View(Districts_data)
+
+Districts_data|>
+  distinct(year)
+
+#dplyr::filter(year != 2007)|>
+
+#Note, data is selected at the school year, and the year variables were simplified to the spring year. For instance, the 2014-15 school year is listed as 2015
+Districts_data <- Districts_data|>
+  drop_na()|>
+  mutate(competition_measure = private_school_count/Shape_Area)|>
+  mutate(total_admin = lea_admin + lea_admin_support + school_admin+ school_admin_support)|>
+  dplyr::filter(total_admin !=0 )|>
+  mutate(log_admin = log(total_admin))|>
+  mutate(admin_student_ratio = total_admin/total_student_num)
+
+#North Carolina Models
+North_Carolina <- Districts_data|>
+  dplyr::filter(state_proper == "North Carolina")|>
+  dplyr::filter(year != 2007)|>
+  mutate(time_run = year - 2014)|>
+  mutate(treated = ifelse(year >= 2014, 1,0))|>
+  drop_na()|>
+  mutate(Treated = ifelse(treated == 1,"Post-treatment","Pre-treatment"))|>
+  mutate(teachers_per_student = teachers/ total_student_num)|>
+  mutate(log_student = log(total_student_num))|>
+  mutate(student_dif = total_student_num - dplyr::lag(total_student_num))
+
+
+# District sample each year- not 2007 was removed due as the yearly average was a significant outlier, without more pre-treatment data, this was as a significant leverage point
+
+North_Carolina|>
+  group_by(year)|>
+  summarize(count = n())
+
+#Summary Statistics
+Admin_summary_stats <- North_Carolina|>
+  group_by(year)|>
+  summarize(
+    mean = mean(admin_student_ratio),
+    median = median(admin_student_ratio),
+    sd = sd(admin_student_ratio),
+    min = min(admin_student_ratio),
+    max = max(admin_student_ratio),
+    quantile_25 = quantile(admin_student_ratio, 0.25),
+    quantile_75 = quantile(admin_student_ratio, 0.75))
+
+# RDiT models including district fixed effects. Admin per Student as Dependent Variable
+
+# no time and agency varying covariates
+NorthCarolina_model1 <- feols(admin_student_ratio ~ time_run * treated | agency_id, data = North_Carolina) 
+summary(NorthCarolina_model1)
+summary(NorthCarolina_model1, vcov = "hetero")
+
+# Adding State Revenue as covariate
+NorthCarolina_model2 <- feols(admin_student_ratio ~ time_run * treated + state_revenue_total | agency_id, cluster = ~ agency_id, data = North_Carolina) 
+
+summary(NorthCarolina_model2)
+summary(NorthCarolina_model2, vcov = "hetero")
+
+#adjusting for student numbers 
+
+NorthCarolina_model3 <- feols(admin_student_ratio ~ time_run * treated + state_revenue_total + total_student_num | agency_id, data = North_Carolina) 
+
+summary(NorthCarolina_model3)
+summary(NorthCarolina_model3, vcov = "hetero")
+
+#Different Polynomial specifications for time function
+model_quadratic <- feols(admin_student_ratio ~ poly(time_run, 2) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(model_quadratic)
+summary(model_quadratic, vcov = "hetero")
+
+model_cubic <- feols(admin_student_ratio ~ poly(time_run, 3) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(model_cubic)
+summary(model_cubic, vcov = "hetero")
+
+model_quartic<- feols(admin_student_ratio ~ poly(time_run, 4) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(model_quartic)
+summary(model_quartic, vcov = "hetero")
+
+model_quintic <- feols(admin_student_ratio ~ poly(time_run, 5) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(model_quintic)
+summary(model_quintic, vcov = "hetero")
+
+#Bayesian Information Criteria, suggests first order model is the best
+poly_bic_value <- c(BIC(NorthCarolina_model2),BIC(model_quadratic), BIC(model_cubic), BIC(model_quartic), BIC(model_quintic))
+
+#Checking for Autocorrelation
+
+residuals <- residuals(NorthCarolina_model2)
+auto_test <- acf(residuals, main = "Autocorrelation Function of Residuals")
+
+normal_model_lm <- lm(admin_student_ratio ~ time_run* treated + state_revenue_total + factor(agency_id), data = North_Carolina)
+durbinWatsonTest(normal_model_lm)
+
+#lagged dependent variable
+North_Carolina <- North_Carolina %>%
+  arrange(agency_id, year)|>
+  group_by(agency_id) %>%
+  mutate(lag1_admin_student_ratio = dplyr::lag(admin_student_ratio, 1))|>
+  mutate(lag2_admin_student_ratio = dplyr::lag(admin_student_ratio, 2)) %>%
+  mutate(lag3_admin_student_ratio = dplyr::lag(admin_student_ratio, 3)) %>%
+  mutate(lag4_admin_student_ratio = dplyr::lag(admin_student_ratio, 4)) %>%
+  ungroup()
+
+NorthCarolina_lag1 <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+
+NorthCarolina_lag1S <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total + total_student_num | agency_id, data = North_Carolina) 
+
+summary(NorthCarolina_lag1S)
+summary(NorthCarolina_lag1S, vcov = "hetero")
+
+NorthCarolina_lag2 <- feols(admin_student_ratio ~ lag2_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+summary(NorthCarolina_lag2)
+summary(NorthCarolina_lag2, vcov = "hetero")
+
+NorthCarolina_lag3 <- feols(admin_student_ratio ~ lag3_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+summary(NorthCarolina_lag3)
+summary(NorthCarolina_lag3, vcov = "hetero")
+
+NorthCarolina_lag4 <- feols(admin_student_ratio ~ lag4_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+summary(NorthCarolina_lag4)
+summary(NorthCarolina_lag4, vcov = "hetero")
+
+#AIC and BIC to determine goodness of fit vs complexity - suggests first lag is the best
+aic_values <- c(AIC(NorthCarolina_lag1), AIC(NorthCarolina_lag2), AIC(NorthCarolina_lag3), AIC(NorthCarolina_lag4))
+
+summary(aic_values)
+bic_values <- c(BIC(NorthCarolina_lag1), BIC(NorthCarolina_lag2), BIC(NorthCarolina_lag3), BIC(NorthCarolina_lag4)) 
+summary(bic_values)
+
+etable(NorthCarolina_lag1, tex = TRUE, file = "Lag_model.tex")
+
+#Adjusting Bandwidth 
+bandwidth3 <-3
+
+bandwidth3_data<- North_Carolina %>%
+  filter(abs(time_run) <= bandwidth3)
+
+bandwidth3_model <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = bandwidth3_data) 
+
+bandwidth3_model2 <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total + total_student_num | agency_id, data = bandwidth3_data) 
+
+summary(bandwidth3_model)
+
+bandwidth2 <- 2
+
+bandwidth2_data<- North_Carolina %>%
+  filter(abs(time_run) <= bandwidth2)
+
+bandwidth2_model <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = bandwidth2_data) 
+summary(bandwidth2_model)
+
+#Creating a treatment tunnel, within a year pre and post treatment
+
+Tunnelbounds <- 1
+
+tunnel_data <- North_Carolina %>%
+  filter(abs(time_run) > Tunnelbounds)
+
+tunnel_data|>
+  distinct(year)
+
+tunnel_model <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = tunnel_data)
+
+tunnel_model2 <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total + total_student_num | agency_id, data = tunnel_data)
+
+summary(tunnel_model)
+
+#Placebo Test placing fake treatment at 2011
+North_Carolina_placebo <- Districts_data|>
+  dplyr::filter(state_proper == "North Carolina")|>
+  dplyr::filter(year != 2007)|>
+  dplyr::filter(year <= 2013)|>
+  mutate(time_run = year - 2011)|>
+  mutate(treated = ifelse(year >= 2011, 1,0))|>
+  drop_na()|>
+  mutate(Treated_YN = ifelse(treated == 1,"Pre-treatment","Post-treatment"))|>
+  group_by(agency_id)|>
+  arrange(agency_id, year)|>
+  mutate(lag1_admin_student_ratio = dplyr::lag(admin_student_ratio, 1)) %>%
+  mutate(log_student = log(total_student_num))|>
+  ungroup()
+  
+North_Carolina_placebo|>
+  distinct(year, treated)
+
+Placebo <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total | agency_id, data = North_Carolina_placebo)
+
+Placebo2 <- feols(admin_student_ratio ~ lag1_admin_student_ratio + time_run * treated + state_revenue_total + total_student_num | agency_id, data = North_Carolina_placebo)
+
+
+summary(Placebo)
+summary(Placebo, vcov = "hetero")
+
+#Visualizations
+
+RDiT_plot <- North_Carolina %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(admin_student_ratio)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators Per Student") +
+  theme_minimal()
+
+total_admin_plot <- North_Carolina %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(total_admin)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators" ) +
+  theme_minimal()
+
+#Shorter Bandwidth Visualization
+
+bandwidth_plot <- bandwidth3_data %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(admin_student_ratio)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed")+
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators Per Student") +
+  theme_minimal()
+
+bandwidth_admin <- bandwidth3_data %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(total_admin)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed")+
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators Per Student") +
+  theme_minimal()
+
+#Tunnel Data Visualization
+tunnel_plot <-tunnel_data %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(admin_student_ratio)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2012, linetype = "dashed") +
+  geom_vline(xintercept = 2016, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators Per Student") +
+theme_minimal()
+
+tunnel_admin <- tunnel_data %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(total_admin)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2012, linetype = "dashed") +
+  geom_vline(xintercept = 2016, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Administrators") +
+  theme_minimal()
+
+# checking if there is a discontinuity in State revenue 
+North_Carolina %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(state_revenue_total)) %>%
+  ggplot(aes(x = year, y = mean_ratio))+
+  geom_point()+
+  geom_smooth(method = "lm",se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "state Revenue") +
+  theme_stata() +
+  scale_color_stata()
+
+# checking if there is a discontinuity in students, the number of students appears to be decreasing at an increasing rate following the treatment year. This could be due to the voucher.
+student_table <- North_Carolina %>%
+  group_by(year) %>%
+  summarize(mean_ratio = mean(total_student_num)) %>%
+  ggplot(aes(x = year, y = mean_ratio))+
+  geom_point()+
+  geom_smooth(method = "lm",formula = y ~ poly(x, 2),se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "Average Number of Students in Public School Districts Over Time", x = "Time", y = "Students") +
+  theme_minimal()
+
+
+North_Carolina %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(student_dif)) %>%
+  ggplot(aes(x = year, y = mean_ratio))+
+  geom_point()+
+  geom_smooth(method = "lm",formula = y ~ poly(x, 1),se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Students") +
+  theme_stata() +
+  scale_color_stata()
+
+North_Carolina %>%
+  group_by(year, Treated) %>%
+  summarize(mean_ratio = mean(student_dif)) %>%
+  ggplot(aes(x = year, y = mean_ratio , color = Treated))+
+  geom_point()+
+  geom_smooth(method = "lm",formula = y ~ poly(x, 2),se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDiT Plot", x = "Time", y = "Students") +
+  theme_stata() +
+  scale_color_stata()
+
+
+student_model <- feols(total_student_num ~ dplyr::lag(total_student_num)+ poly(time_run, 1) * treated | agency_id, data = North_Carolina) 
+summary(NorthCarolina_model1)
+summary(NorthCarolina_model1, vcov = "hetero")
+
+```
+
+```{r}
+#nice tables for LaTeX
+
+#Summary Tables
+admin_student_summary <- kable(Admin_summary_stats, format = "latex", booktabs = TRUE)|>
+  kable_styling(latex_options = c("striped", "hold_position"))
+cat(admin_student_summary)
+#models and plots
+
+NorthCarolina_model2
+
+latex_model <- texreg::texreg(list(NorthCarolina_model2), file = NULL, single.row = TRUE)
+
+cat(latex_model)
+
+RDiT_plot
+ggsave("RDiT_plot.pdf", plot = RDiT_plot)
+
+total_admin_plot
+
+ggsave("total_admin_plot.pdf", plot = total_admin_plot)
+
+student_table
+ggsave("student_table.pdf", plot = student_table)
+
+# Extract coefficients, standard errors, and other statistics
+coef_model2 <- coef(NorthCarolina_model2)
+se_model2 <- se(NorthCarolina_model2)
+pval_model2 <- pvalue(NorthCarolina_model2)
+
+coef_lag1 <- coef(NorthCarolina_lag1)
+se_lag1 <- se(NorthCarolina_lag1)
+pval_lag1 <- pvalue(NorthCarolina_lag1)
+
+coef_lag1S <- coef(NorthCarolina_lag1S)
+se_lag1S <- se(NorthCarolina_lag1S)
+pval_lag1S <- pvalue(NorthCarolina_lag1S)
+
+
+covariate.labels_model2 <- c("Time","Post", "Total State Revenue", "Treated Over Time")
+covariate.labels_lag1 <- c("Lag Dependent", "Time","Post", "Total State Revenue", "Treated Over Time")
+
+texreg(
+  list(NorthCarolina_model1,NorthCarolina_model2, NorthCarolina_lag1, NorthCarolina_lag1S),
+  file = "models.tex",
+  caption = "RDiT Models",
+  custom.model.names = c("Initial Model", "State Revenue Model", "Lag Model","Student Model"),
+  custom.gof.names = c("Observations", "Fixed-effects (agency_id)", "Clustered SE (agency_id)", "RMSE", "Adj. R2", "Within R2"),
+  single.row = TRUE
+)
+
+
+texreg(
+  list(bandwidth3_model,tunnel_model,Placebo),
+  file = "Robust.tex",
+  caption = "Robustness Models",
+  custom.model.names = c(" Adjusted Bandwidth", "Donut Model", "Placebo 2011"),
+  custom.coef.names = c("Lag Dependent", "Time_Run", "Treated", "State Revenue Total", "Time_Run:Treated"),
+  custom.gof.names = c("Observations", "Fixed-effects (agency_id)", "Clustered SE (agency_id)", "RMSE", "Adj. R2", "Within R2"),
+  single.row = TRUE
+)
+
+
+texreg(
+  list(bandwidth3_model2,tunnel_model2,Placebo2),
+  file = "Robust2.tex",
+  caption = "Robustness Models",
+  custom.model.names = c(" Adjusted Bandwidth", "Donut Model", "Placebo 2011"),
+  custom.gof.names = c("Observations", "Fixed-effects (agency_id)", "Clustered SE (agency_id)", "RMSE", "Adj. R2", "Within R2"),
+  single.row = TRUE
+)
+
+latex_lag <- texreg::texreg(list(NorthCarolina_lag1), file = NULL, single.row = TRUE)
+
+cat(latex_lag)
+
+bandwidth3_model 
+
+latex_bandwidth <- texreg::texreg(list(bandwidth3_model), file = NULL, single.row = TRUE)
+
+cat(latex_bandwidth)
+
+tunnel_model
+
+latex_tunnel <- texreg::texreg(list(tunnel_model), file = NULL, single.row = TRUE)
+
+cat(latex_tunnel)
+tunnel_plot
+ggsave("tunnel_plot.pdf", plot = tunnel_plot)
+
+bandwidth_plot
+ggsave("bandwidth_plot.pdf", plot = bandwidth_plot)
+
+#admin plots
+tunnel_admin
+ggsave("tunnel_admin.pdf", plot = tunnel_admin)
+
+ggsave("bandwidth_admin.pdf", plot = bandwidth_admin)
+
+Placebo 
+latex_placebo <- texreg::texreg(list(Placebo), file = NULL, single.row = TRUE)
+
+cat(latex_placebo)
+
+
+
+# appedix stuff
+
+texreg(
+  list(NorthCarolina_model1 ,model_quadratic,model_cubic, model_quadratic, model_quintic),
+  file = "polynomial.tex",
+  caption = "RDiT Models",
+  custom.gof.names = c("Observations", "Fixed-effects (agency_id)", "Clustered SE (agency_id)", "RMSE", "Adj. R2", "Within R2"),
+  single.row = TRUE
+)
+
+#autocorrelation test 
+
+
+```
+
+```{r eval = FALSE}
+# Teachers Per Student
+
+#Summary Statistics
+Teacher_summary_stats <- North_Carolina|>
+  group_by(year)|>
+  summarize(
+    mean = mean(teachers_per_student),
+    median = median(teachers_per_student),
+    sd = sd(teachers_per_student),
+    min = min(teachers_per_student),
+    max = max(teachers_per_student),
+    quantile_25 = quantile(teachers_per_student, 0.25),
+    quantile_75 = quantile(teachers_per_student, 0.75))
+
+#RDiT models including district fixed effects. Teachers per Student as Dependent Variable
+
+# no time and agency varying covariates
+NorthCarolina_Teacher1 <- feols(teachers_per_student ~ time_run * treated | agency_id, data = North_Carolina) 
+summary(NorthCarolina_Teacher1)
+summary(NorthCarolina_Teacher1, vcov = "hetero")
+
+# added State Revenue as covariate
+NorthCarolina_Teacher2 <- feols(teachers_per_student ~ time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+
+summary(NorthCarolina_Teacher2)
+summary(NorthCarolina_Teacher2, vcov = "hetero")
+
+#Different Polynomial specifications for time function
+
+Teacher_quadratic <- feols(teachers_per_student ~ poly(time_run, 2) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(Teacher_quadratic)
+summary(Teacher_quadratic, vcov = "hetero")
+
+model_cubic <- feols(teachers_per_student ~ poly(time_run, 3) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(model_cubic)
+summary(model_cubic, vcov = "hetero")
+
+#lagged dependent variable
+North_Carolina <- North_Carolina %>%
+  group_by(agency_id) %>%
+  arrange(year) %>%
+  mutate(lagged_teachers_per_student = lag(teachers_per_student, 1)) %>%
+  ungroup()
+View(North_Carolina)
+
+Teacher_lag1 <- feols(lagged_teachers_per_student ~ time_run * treated | agency_id, data = North_Carolina) 
+summary(NorthCarolina_lag1)
+summary(NorthCarolina_lag1, vcov = "hetero")
+
+# added State Revenue as covariate in lag model
+Teacher_lag2 <- feols(lagged_teachers_per_student ~ time_run * treated + state_revenue_total | agency_id, data = North_Carolina) 
+summary(NorthCarolina_lag2)
+summary(NorthCarolina_lag2, vcov = "hetero")
+
+#Different Polynomial specifications for time function, lagged dependent
+lag_Teacher_quadratic  <- feols(lagged_teachers_per_student ~ poly(time_run, 2) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(lag_Teacher_quadratic)
+summary(model_quadratic, vcov = "hetero")
+
+
+lag_Teacher_cubic <- feols(lagged_teachers_per_student ~ poly(time_run, 3) * treated + state_revenue_total | agency_id, data = North_Carolina)
+
+summary(lag_Teacher_cubic)
+summary(lag_Teacher_cubic, vcov = "hetero")
+
+#Visualizations of the RDiT
+
+
+North_Carolina %>%
+  group_by(year, Treated_YN) %>%
+  summarize(mean_ratio = mean(total_student_num)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated_YN))+
+  geom_point()+
+  geom_smooth(method = "lm", ,formula = y ~ poly(x, 4),se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDD Plot", x = "Time", y = "students") +
+  theme_minimal()
+
+North_Carolina %>%
+  group_by(year) %>%
+  summarize(mean_ratio = mean(teachers)) %>%
+  ggplot(aes(x = year, y = mean_ratio))+
+  geom_point()+
+  geom_smooth(method = "lm", ,formula = y ~ poly(x, 3),se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDD Plot", x = "Time", y = "students") +
+  theme_minimal()
+
+North_Carolina %>%
+  group_by(year, Treated_YN) %>%
+  summarize(mean_ratio = mean(teachers_per_student)) %>%
+  ggplot(aes(x = year, y = mean_ratio, color = Treated_YN))+
+  geom_point()+
+  geom_smooth(method = "lm",formula = y ~ poly(x ,3), se = FALSE)+
+  geom_vline(xintercept = 2014, linetype = "dashed") +
+  labs(title = "RDD Plot", x = "Time", y = "Teacher Pupil Ratio") +
+  theme_minimal()
+
+```
+
+```{r, eval = FALSE}
+#Difference in Differences
+
+#voucher_states <- c("Montana", "Wyoming", "District Of Columbia", "South Dakota", "Iowa", "Nevada", "Arizona", "Utah", "Nebraska", "Missouri", "Kansas", "Arkansas", "Oklahoma", "Louisiana", "Mississippi","Tennessee", "Alabama", "South Carolina", "Georgia", "Florida",   "Virginia", "West Virginia","Maryland", "Indiana", "Ohio", "Pennsylvania", "New Hampshire","Rhode Island")
+
+#Districts_data_novoucher <- Districts_data|>
+  dplyr::filter(!state_proper %in% voucher_states)|>
+  mutate(treated = ifelse(state_proper == "North Carolina", 1,0))|>
+  mutate(post = ifelse(year>= 2014,1,0))
+
+#Checking Panel - removing these years to keep all states
+
+'' panel_balance <- Districts_data_novoucher %>%
+  drop_na()|>
+  dplyr::filter(!year != 2007)|>
+  group_by(agency_id) %>%
+  summarize(year_count = n_distinct(year)) %>%
+  filter(year_count == max(year_count)) %>%
+  select(agency_id)|>
+  distinct() ''
+
+#Checking Panel
+Districts_data_novoucher  <- semi_join(Districts_data_novoucher , panel_balance, by = "agency_id")
+
+#Checking Panel
+Panel <- pdata.frame(Districts_data_novoucher, index = c("agency_id", "year"))
+
+#Checking Panel
+is.pbalanced(Panel)
+
+# dif-in-diff 1 
+
+model1 <- plm(admin_student_ratio ~ treated*post , data = Panel, model = "within", effect = "twoways")
+summary(model1)
+
+#pretrends
+
+pre_treatment_data <- subset(Districts_data_novoucher, year < 2014)
+
+pre_panel <- pdata.frame(pre_treatment_data, index = c("agency_id", "year"))
+
+
+average_outcome <- pre_treatment_data %>%
+  group_by(year, treated) %>%
+  summarize(mean_outcome = mean(admin_student_ratio))
+
+parallel_trends_model <- plm(admin_student_ratio ~ treated *year + total_state_revenue, 
+                             data = pre_panel, 
+                             model = "within", 
+                             effect = "individual")
+
+summary(parallel_trends_model)
+#whole thing 
+
+post_treatment <- Districts_data_novoucher %>%
+  group_by(year, treated) %>%
+  summarize(mean_outcome = mean(admin_student_ratio))
+
+ggplot(average_outcome, aes(x = year, y = mean_outcome, color = factor(treated))) +
+geom_smooth(method = "lm",se = FALSE)+
+  labs(title = "Pre-treatment Trends", x = "Time Period", y = "Average Admin-Student Ratio", color = "Treated")
+
+
+# so maybe not parallel trends
+ggplot(post_treatment, aes(x = year, y = mean_outcome, color = factor(treated))) +
+geom_smooth(method = "lm",se = FALSE)+
+  labs(title = "Pre-treatment Trends", x = "Time Period", y = "Average Admin-Student Ratio", color = "Treated")
+
+
+
+
+data_wide <- Districts_data_novoucher %>%
+  pivot_wider(names_from = year, values_from = admin_student_ratio, names_prefix = "year_") %>%
+  arrange(agency_id)
+View(data_wide)
+
+Districts_data_novoucher <- Districts_data_novoucher|>
+  mutate(treated_post = treated*post)|>
+  mutate(treatment_group = ifelse (treated_post == 1,1,0))|>
+  
+
+#Districts_data_novoucher|>
+  dplyr::filter(treatment_group == 1)|>
+  distinct(year)
+
+#gsynth(admin_student_ratio ~ treated_post, data = Districts_data_novoucher, index = c("agency_id", "year"), force = "two-way", se = TRUE, nboots = 1000)
+
+
+```
